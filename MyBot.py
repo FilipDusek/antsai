@@ -2,101 +2,67 @@
 from __future__ import division
 from ants import Ants
 import os
-from storage import TrainingStorage
 from antutils import logexcept, DEBUG_LOG, log
-from BotDecisionMaker import DecisionMaker
-import numpy as np
-from tracking import Tracking
+import random
+from collections import namedtuple
+
 
 class MyBot:
-    def __init__(self, storage):
-        self.storage = storage
-        self.dmake = DecisionMaker()
-        self.directions = {
-            0: 'n',
-            1: 'e',
-            2: 's',
-            3: 'w',
-            4: 'r'
-        }
-        self.history = {}
-        self.history_length = 2
+    def __init__(self):
         self.turn = 0
-        self.tracking = None
+        self.orders = {}
 
     def do_setup(self, ants):
         pass
 
-    def think(self, sparse_state):
-        state_list = []
-        for sparse_state_channel in sparse_state:
-            state_channel = sparse_state_channel.toarray()
-            state_list.append(state_channel)
-        state = np.stack(state_list)
-        decision = self.dmake.make_decision(state)
+    def ant_distances(self, ants, loc):
+        return {ant: ants.distance(ant, loc) for ant in ants.my_ants()}
 
-        return decision
+    def find_goals(self, ants):
+        Goal = namedtuple('Goal', 'goal distances')
+        foods = [Goal(goal=food, distances=self.ant_distances(ants, food)) for food in ants.food()]
+        enemies = [Goal(goal=loc, distances=self.ant_distances(ants, loc)) for loc, owner in ants.enemy_ants()]
 
-    def reward(self, food, is_killed):
-        # number of food x 100, if killed subtract 100000
-        reward = food * 100 - is_killed * 200
-        return reward
+        return foods + enemies
 
-    def append_history(self, state, action, label, future_food):
-        if self.turn in self.history:
-            self.history[self.turn].append((state, action, label, future_food))
-        else:
-            self.history[self.turn] = [(state, action, label, future_food)]
+    def prioritize_goals(self, goals):
+        prioritized = sorted(goals, key=lambda goal: min(goal.distances.values()))
 
-        expired = (key for key in self.history.keys() if key <= (self.turn - self.history_length))
-        for turn in list(expired):
-            del self.history[turn]
+        return prioritized
+
+    def issue_orders(self, ants, orders):
+        current_locs = [loc for loc, _ in orders]
+        occupied = [loc for loc in ants.my_ants() if loc not in current_locs]
+
+        for ant_loc, dirs in orders:
+            for direction in dirs:
+                dest = ants.destination(ant_loc, direction)
+                if dest not in occupied:
+                    ants.issue_order((ant_loc, direction))
+                    occupied.append(dest)
+
+    def assign_goals(self, ants):
+        goals = self.find_goals(ants)
+        orders = []
+        while any(map(lambda goal: goal.distances, goals)):
+            prioritized_goals = self.prioritize_goals(goals)
+
+            goal_loc, distances = prioritized_goals.pop(0)
+            ant_loc = min(distances, key=distances.get)
+            direction = ants.direction(ant_loc, goal_loc)
+            orders.append((ant_loc, direction))
+
+            for goal in prioritized_goals:
+                goal.distances.pop(ant_loc)
+
+            goals = prioritized_goals
+
+        self.issue_orders(ants, orders)
 
     @logexcept
     def do_turn(self, ants):
         self.turn += 1
-        if not self.tracking:
-            self.tracking = Tracking()
-        self.tracking.update(ants)
-
-        for ant_loc in ants.my_ants():
-            state = self.storage.state(ants, ant_loc)
-            direction_onehot = self.think(state)
-            direction = self.directions[np.where(direction_onehot == 1)[0][0]]
-
-
-            if direction != 'r':
-                new_loc = ants.destination(ant_loc, direction)
-            else:
-                new_loc = ant_loc
-            log((self.turn, 'Moving ant ', ant_loc, ' to ', new_loc))
-
-            # remember what have we done this turn
-            label = self.tracking.loc_to_ants[ant_loc]
-            future_food = self.tracking.adjacent_food(new_loc, ants)
-            self.append_history(state, direction_onehot, label, future_food)
-
-            if direction != 'r':
-                self.tracking.move_ant(ant_loc, direction, ants)
-
-            # TODO: how often are we running out of time?
-            if ants.time_remaining() < 10:
-                log(('timeout'))
-                break
-
-
-        # we need to know the outcome before we calculate the reward
-        # thats why only previous turn is stored
-        offset = 1
-        if len(self.history) > offset:
-            for prev_state, prev_action, prev_label, food in self.history[self.turn - offset]:
-                self.storage.remember(
-                    prev_state, prev_action,
-                    self.reward(food, self.tracking.is_killed(prev_label)), prev_label,
-                    self.turn - offset
-                )
-
-        self.dmake.save_epsilon()
+        self.assign_goals(ants)
 
 
 if __name__ == '__main__':
@@ -106,8 +72,8 @@ if __name__ == '__main__':
             os.remove(DEBUG_LOG)
         except OSError:
             pass
-        storage = TrainingStorage(remove=True)
-        Ants.run(MyBot(storage))
+
+        Ants.run(MyBot())
 
     try:
         import psyco

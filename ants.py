@@ -169,6 +169,24 @@ class Ants():
                     for (row, col), owner in self.ant_list.items()
                     if owner != MY_ANT]
 
+    def __closest_food(self, loc):
+        seens = set()
+        explores = [loc]
+        unseens = []
+        destinations = []
+        for depth in range(3):
+            for explore in explores:
+                destinations += [self.destination(explore, direction) for direction in AIM.keys()]
+            explores = []
+
+            unseens = (destination for destination in destinations if destination not in seens)
+            for unseen in unseens:
+                if unseen in self.food_list:
+                    return unseen
+                else:
+                    seens.add(unseen)
+                    explores.append(unseen)
+
     def food(self):
         'return a list of all food locations'
         return self.food_list[:]
